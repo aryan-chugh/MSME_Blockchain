@@ -1,0 +1,20 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "deployer": "0x4C7A8d194A36FDf53365490D1cAd92E59f648571",
+  "timestamp": "2025-10-21",
+  "contracts": {
+    "CIToken": "0xb9ED4a38536BB4B3CbC3e24d5761E7E84D16634d",
+    "OracleStaking": "0x78141b091Ca7a3bFB27FE071A11C708887cC7C1D",
+    "AttestationRegistry": "0xE4F66b09ab3F4Dc3e0FCB60A73A1b302976f19f9",
+    "LoanMarketplace": "0x37080B104E2Fdb3D14511acB8Fc6A61F7b50Ef0E",
+    "LoanAgreementRegistry": "0xfa309e4D7DbEfF4429d9D85A8faF3511a4401a85",
+    "PlatformGovernance": "0xAC6F626A6c58101cbc86AbEbD8dE428534D4a668",
+    "SampleMSMEIdentity": "0x18b74bf20fA4444CC3bA96aD16db79832feF8215"
+  },
+  "configuration": {
+    "governance_configured": true,
+    "schemas_registered": "partial",
+    "sample_identity": "pending"
+  }
+}
