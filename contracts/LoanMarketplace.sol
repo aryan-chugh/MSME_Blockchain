@@ -35,10 +35,25 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
         uint256 timestamp;
         bool withdrawn;
     }
+    
+    // Lender profile structure
+    struct LenderProfile {
+        string displayName;
+        string businessName;
+        string lenderType;          // e.g., "Individual", "Institution", "Fund"
+        uint256 yearsExperience;
+        uint256 fundingCapacity;
+        string preferredIndustries; // Comma-separated list
+        string bio;
+        uint256 createdAt;
+        uint256 updatedAt;
+        bool exists;
+    }
 
     // State variables
     mapping(uint256 => LoanRequest) public requests;
     mapping(uint256 => mapping(address => bytes32)) public commitments;
+    mapping(uint256 => mapping(address => bool)) public hasRevealed; // Track if lender has revealed
     mapping(uint256 => RevealedBid[]) public revealedBids;
     mapping(uint256 => address) public winningLenders;
     mapping(uint256 => uint256) public winningRates;
@@ -47,9 +62,15 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
     mapping(uint256 => mapping(address => uint256)) public bidDeposits;
     uint256 public constant MIN_DEPOSIT_PERCENT = 5; // 5% of loan amount required as deposit
     
+    // Track committed lenders for each request
+    mapping(uint256 => address[]) public committedLenders;
+    
+    // Lender profiles
+    mapping(address => LenderProfile) public lenderProfiles;
+    
     uint256 public requestCounter;
-    uint256 public constant MIN_COMMIT_PERIOD = 1 hours;
-    uint256 public constant MIN_REVEAL_PERIOD = 1 hours;
+    uint256 public constant MIN_COMMIT_PERIOD = 2 minutes; // Reduced for testing (was 1 hours)
+    uint256 public constant MIN_REVEAL_PERIOD = 2 minutes; // Reduced for testing (was 1 hours)
     uint256 public constant MAX_COMMIT_PERIOD = 7 days;
     
     // Events
@@ -81,6 +102,7 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
     event BidDepositPaid(uint256 indexed requestId, address indexed lender, uint256 amount);
     event BidDepositRefunded(uint256 indexed requestId, address indexed lender, uint256 amount);
     event BidDepositSlashed(uint256 indexed requestId, address indexed lender, uint256 amount);
+    event LenderProfileUpdated(address indexed lender, uint256 timestamp);
 
     modifier onlyGovernance() {
         require(msg.sender == governance, "Only governance can call");
@@ -174,6 +196,7 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
         
         commitments[requestId][msg.sender] = commitment;
         bidDeposits[requestId][msg.sender] = msg.value;
+        committedLenders[requestId].push(msg.sender);
         
         emit BidCommitted(requestId, msg.sender, commitment);
         emit BidDepositPaid(requestId, msg.sender, msg.value);
@@ -196,10 +219,14 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
         require(block.timestamp > request.commitDeadline, "Still in commit phase");
         require(block.timestamp <= request.revealDeadline, "Reveal period ended");
         require(commitments[requestId][msg.sender] != bytes32(0), "No commitment found");
+        require(!hasRevealed[requestId][msg.sender], "Already revealed"); // PREVENT MULTIPLE REVEALS
         
         // Verify the commitment
         bytes32 computedHash = keccak256(abi.encodePacked(rateBP, nonce, msg.sender));
         require(computedHash == commitments[requestId][msg.sender], "Invalid reveal");
+        
+        // Mark as revealed
+        hasRevealed[requestId][msg.sender] = true;
         
         // Update status to Reveal if this is the first reveal
         if (request.status == Status.Open) {
@@ -259,6 +286,43 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
         request.status = Status.Matched;
         
         emit LoanMatched(requestId, request.msme, winner, lowestRate);
+    }
+
+    /**
+     * @dev MSME manually selects a specific bid (by lender address)
+     * @param requestId ID of the loan request
+     * @param selectedLender Address of the chosen lender
+     */
+    function selectBid(uint256 requestId, address selectedLender) external nonReentrant {
+        LoanRequest storage request = requests[requestId];
+        
+        require(msg.sender == request.msme, "Only MSME can select bid");
+        require(request.status == Status.Reveal, "Not in reveal phase");
+        require(block.timestamp > request.revealDeadline, "Reveal period not ended");
+        
+        RevealedBid[] storage bids = revealedBids[requestId];
+        require(bids.length > 0, "No bids revealed");
+        
+        // Find the selected lender's bid
+        bool found = false;
+        uint256 selectedRate = 0;
+        
+        for (uint256 i = 0; i < bids.length; i++) {
+            if (bids[i].lender == selectedLender && !bids[i].withdrawn) {
+                found = true;
+                selectedRate = bids[i].rateBP;
+                break;
+            }
+        }
+        
+        require(found, "Selected lender bid not found or withdrawn");
+        
+        // Set the winner
+        winningLenders[requestId] = selectedLender;
+        winningRates[requestId] = selectedRate;
+        request.status = Status.Matched;
+        
+        emit LoanMatched(requestId, request.msme, selectedLender, selectedRate);
     }
 
     /**
@@ -423,6 +487,44 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
     }
 
     /**
+     * @dev Get all committed lenders for a request
+     * @param requestId ID of the loan request
+     * @return address[] Array of committed lender addresses
+     */
+    function getCommittedLenders(uint256 requestId) external view returns (address[] memory) {
+        return committedLenders[requestId];
+    }
+
+    /**
+     * @dev Get lenders who committed but didn't reveal (slashable)
+     * @param requestId ID of the loan request
+     * @return address[] Array of non-revealing lender addresses
+     */
+    function getNonRevealingLenders(uint256 requestId) external view returns (address[] memory) {
+        address[] memory committed = committedLenders[requestId];
+        uint256 nonRevealCount = 0;
+        
+        // Count non-revealing lenders
+        for (uint256 i = 0; i < committed.length; i++) {
+            if (!hasRevealed[requestId][committed[i]] && bidDeposits[requestId][committed[i]] > 0) {
+                nonRevealCount++;
+            }
+        }
+        
+        // Build result array
+        address[] memory nonRevealing = new address[](nonRevealCount);
+        uint256 index = 0;
+        for (uint256 i = 0; i < committed.length; i++) {
+            if (!hasRevealed[requestId][committed[i]] && bidDeposits[requestId][committed[i]] > 0) {
+                nonRevealing[index] = committed[i];
+                index++;
+            }
+        }
+        
+        return nonRevealing;
+    }
+
+    /**
      * @dev Generate commitment hash (helper for off-chain)
      * @param rateBP Interest rate in basis points
      * @param nonce Random nonce
@@ -436,4 +538,63 @@ contract LoanMarketplace is ReentrancyGuard, Pausable {
     ) external pure returns (bytes32) {
         return keccak256(abi.encodePacked(rateBP, nonce, lender));
     }
+
+    /**
+     * @dev Set or update lender profile
+     * @param displayName Display name of the lender
+     * @param businessName Business or organization name
+     * @param lenderType Type of lender (e.g., "Individual", "Institution")
+     * @param yearsExperience Years of lending experience
+     * @param fundingCapacity Maximum funding capacity
+     * @param preferredIndustries Comma-separated list of preferred industries
+     * @param bio Biography or description
+     */
+    function setLenderProfile(
+        string calldata displayName,
+        string calldata businessName,
+        string calldata lenderType,
+        uint256 yearsExperience,
+        uint256 fundingCapacity,
+        string calldata preferredIndustries,
+        string calldata bio
+    ) external {
+        require(bytes(displayName).length > 0, "Display name required");
+        
+        LenderProfile storage profile = lenderProfiles[msg.sender];
+        
+        profile.displayName = displayName;
+        profile.businessName = businessName;
+        profile.lenderType = lenderType;
+        profile.yearsExperience = yearsExperience;
+        profile.fundingCapacity = fundingCapacity;
+        profile.preferredIndustries = preferredIndustries;
+        profile.bio = bio;
+        profile.updatedAt = block.timestamp;
+        
+        if (!profile.exists) {
+            profile.createdAt = block.timestamp;
+            profile.exists = true;
+        }
+        
+        emit LenderProfileUpdated(msg.sender, block.timestamp);
+    }
+
+    /**
+     * @dev Get lender profile
+     * @param lender Address of the lender
+     * @return LenderProfile struct
+     */
+    function getLenderProfile(address lender) external view returns (LenderProfile memory) {
+        return lenderProfiles[lender];
+    }
+
+    /**
+     * @dev Check if lender has a profile
+     * @param lender Address of the lender
+     * @return bool True if profile exists
+     */
+    function hasProfile(address lender) external view returns (bool) {
+        return lenderProfiles[lender].exists;
+    }
 }
+

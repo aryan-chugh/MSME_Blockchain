@@ -14,6 +14,29 @@ contract AttestationRegistry is Pausable {
     OracleStaking public immutable oracleStaking;
     address public governance;
 
+    // Attestation Request structure (MSME requests oracle verification)
+    struct AttestationRequest {
+        uint256 id;
+        address msme;
+        bytes32 schemaId;
+        string documentHash;
+        string documentUrl;
+        bytes additionalData;
+        uint256 feePaid;
+        uint256 timestamp;
+        RequestStatus status;
+        address assignedOracle;
+        uint256 completedAt;
+    }
+
+    enum RequestStatus {
+        Pending,
+        InProgress,
+        Completed,
+        Rejected,
+        Cancelled
+    }
+
     // Attestation structure
     struct Attestation {
         bytes32 schemaId;      // Schema identifier (e.g., keccak256("gst-revenue"))
@@ -33,6 +56,11 @@ contract AttestationRegistry is Pausable {
     }
 
     // Mappings
+    mapping(uint256 => AttestationRequest) public attestationRequests;
+    uint256 public requestCounter;
+    mapping(address => uint256[]) public msmeRequests; // MSME => request IDs
+    mapping(address => uint256[]) public oracleRequests; // Oracle => request IDs assigned
+    
     mapping(address => Attestation[]) public attestations;
     mapping(bytes32 => Schema) public schemas;
     mapping(address => mapping(bytes32 => uint256)) public attestationCount; // msme => schemaId => count
@@ -46,6 +74,18 @@ contract AttestationRegistry is Pausable {
     bytes32[] public schemaList;
 
     // Events
+    event AttestationRequested(
+        uint256 indexed requestId,
+        address indexed msme,
+        bytes32 indexed schemaId,
+        uint256 feePaid,
+        string documentHash
+    );
+    event RequestAssigned(uint256 indexed requestId, address indexed oracle);
+    event RequestCompleted(uint256 indexed requestId, uint256 attestationIndex);
+    event RequestRejected(uint256 indexed requestId, address indexed oracle, string reason);
+    event RequestCancelled(uint256 indexed requestId, address indexed msme);
+    
     event AttestationMade(
         address indexed msmeId, 
         address indexed issuer, 
@@ -101,6 +141,96 @@ contract AttestationRegistry is Pausable {
     }
 
     /**
+     * @dev MSME creates an attestation request (stores on-chain for oracles to pick up)
+     * @param schemaId Schema identifier for the attestation type
+     * @param documentHash Hash of the document to be verified
+     * @param documentUrl URL where oracle can access the document
+     * @param additionalData Any additional information encoded as bytes
+     * @param feePaid Amount of CIT tokens paid as fee
+     */
+    function requestAttestation(
+        bytes32 schemaId,
+        string calldata documentHash,
+        string calldata documentUrl,
+        bytes calldata additionalData,
+        uint256 feePaid
+    ) external whenNotPaused returns (uint256) {
+        require(schemas[schemaId].active, "Schema not active");
+        require(bytes(documentHash).length > 0, "Document hash required");
+        require(feePaid > 0, "Fee must be greater than 0");
+        
+        requestCounter++;
+        uint256 requestId = requestCounter;
+        
+        attestationRequests[requestId] = AttestationRequest({
+            id: requestId,
+            msme: msg.sender,
+            schemaId: schemaId,
+            documentHash: documentHash,
+            documentUrl: documentUrl,
+            additionalData: additionalData,
+            feePaid: feePaid,
+            timestamp: block.timestamp,
+            status: RequestStatus.Pending,
+            assignedOracle: address(0),
+            completedAt: 0
+        });
+        
+        msmeRequests[msg.sender].push(requestId);
+        
+        emit AttestationRequested(requestId, msg.sender, schemaId, feePaid, documentHash);
+        
+        return requestId;
+    }
+
+    /**
+     * @dev Oracle assigns themselves to a pending request
+     * @param requestId ID of the attestation request
+     */
+    function assignRequest(uint256 requestId) external onlyStakedOracle {
+        AttestationRequest storage request = attestationRequests[requestId];
+        require(request.msme != address(0), "Request does not exist");
+        require(request.status == RequestStatus.Pending, "Request not available");
+        
+        request.status = RequestStatus.InProgress;
+        request.assignedOracle = msg.sender;
+        oracleRequests[msg.sender].push(requestId);
+        
+        emit RequestAssigned(requestId, msg.sender);
+    }
+
+    /**
+     * @dev Oracle rejects an attestation request
+     * @param requestId ID of the attestation request
+     * @param reason Reason for rejection
+     */
+    function rejectRequest(uint256 requestId, string calldata reason) external onlyStakedOracle {
+        AttestationRequest storage request = attestationRequests[requestId];
+        require(request.assignedOracle == msg.sender, "Not assigned to you");
+        require(request.status == RequestStatus.InProgress, "Request not in progress");
+        
+        request.status = RequestStatus.Rejected;
+        request.completedAt = block.timestamp;
+        
+        emit RequestRejected(requestId, msg.sender, reason);
+    }
+
+    /**
+     * @dev MSME cancels their own request
+     * @param requestId ID of the attestation request
+     */
+    function cancelRequest(uint256 requestId) external {
+        AttestationRequest storage request = attestationRequests[requestId];
+        require(request.msme == msg.sender, "Not your request");
+        require(request.status == RequestStatus.Pending, "Cannot cancel");
+        
+        request.status = RequestStatus.Cancelled;
+        request.completedAt = block.timestamp;
+        
+        emit RequestCancelled(requestId, msg.sender);
+    }
+
+    /**
      * @dev Register a new attestation schema
      * @param schemaId Unique identifier for the schema
      * @param name Human-readable name
@@ -125,17 +255,19 @@ contract AttestationRegistry is Pausable {
     }
 
     /**
-     * @dev Submit an attestation for an MSME
+     * @dev Submit an attestation for an MSME (can be linked to a request)
      * @param msmeId Address of the MSME identity contract
      * @param schemaId Schema identifier
      * @param data Encoded attestation data
      * @param validityPeriod How long the attestation is valid (in seconds)
+     * @param requestId Optional: ID of the attestation request (0 if not linked)
      */
     function submitAttestation(
         address msmeId,
         bytes32 schemaId,
         bytes calldata data,
-        uint256 validityPeriod
+        uint256 validityPeriod,
+        uint256 requestId
     ) external onlyStakedOracle whenNotPaused {
         require(msmeId != address(0), "Invalid MSME address");
         require(schemas[schemaId].active, "Schema not active");
@@ -163,6 +295,18 @@ contract AttestationRegistry is Pausable {
         
         // Increment oracle's attestation count
         oracleStaking.incrementAttestationCount(msg.sender);
+        
+        // If this attestation is linked to a request, mark it as completed
+        if (requestId > 0) {
+            AttestationRequest storage request = attestationRequests[requestId];
+            require(request.assignedOracle == msg.sender, "Not assigned to you");
+            require(request.status == RequestStatus.InProgress, "Request not in progress");
+            
+            request.status = RequestStatus.Completed;
+            request.completedAt = block.timestamp;
+            
+            emit RequestCompleted(requestId, attestationIndex);
+        }
         
         emit AttestationMade(msmeId, msg.sender, schemaId, attestationIndex);
     }
@@ -358,5 +502,61 @@ contract AttestationRegistry is Pausable {
      */
     function getCoAttestationCount(address oracle1, address oracle2) external view returns (uint256) {
         return coAttestationCount[oracle1][oracle2];
+    }
+
+    /**
+     * @dev Get all pending attestation requests (for oracles to browse)
+     * @return Array of pending request IDs
+     */
+    function getPendingRequests() external view returns (uint256[] memory) {
+        uint256 pendingCount = 0;
+        
+        // First, count pending requests
+        for (uint256 i = 1; i <= requestCounter; i++) {
+            if (attestationRequests[i].status == RequestStatus.Pending) {
+                pendingCount++;
+            }
+        }
+        
+        // Then, populate array
+        uint256[] memory pendingIds = new uint256[](pendingCount);
+        uint256 index = 0;
+        
+        for (uint256 i = 1; i <= requestCounter; i++) {
+            if (attestationRequests[i].status == RequestStatus.Pending) {
+                pendingIds[index] = i;
+                index++;
+            }
+        }
+        
+        return pendingIds;
+    }
+
+    /**
+     * @dev Get requests assigned to a specific oracle
+     * @param oracle Oracle address
+     * @return Array of request IDs
+     */
+    function getOracleRequests(address oracle) external view returns (uint256[] memory) {
+        return oracleRequests[oracle];
+    }
+
+    /**
+     * @dev Get requests created by a specific MSME
+     * @param msme MSME address
+     * @return Array of request IDs
+     */
+    function getMSMERequests(address msme) external view returns (uint256[] memory) {
+        return msmeRequests[msme];
+    }
+
+    /**
+     * @dev Get detailed information about a specific request
+     * @param requestId Request ID
+     * @return Full attestation request struct
+     */
+    function getRequestDetails(uint256 requestId) external view returns (AttestationRequest memory) {
+        require(attestationRequests[requestId].msme != address(0), "Request does not exist");
+        return attestationRequests[requestId];
     }
 }

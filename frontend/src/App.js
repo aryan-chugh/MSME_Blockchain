@@ -5,11 +5,11 @@ import { connectWallet, onAccountsChanged, onChainChanged, getCurrentAccount } f
 import { checkNetwork, NETWORK_CONFIG } from './utils/contracts';
 
 // Components
-import Home from './components/Home';
-import MSMEDashboard from './components/MSMEDashboard';
-import LenderDashboard from './components/LenderDashboard';
-import OracleDashboard from './components/OracleDashboard';
-import Marketplace from './components/Marketplace';
+import Home from './components/pages/Home';
+import MSMEDashboard from './components/pages/MSMEDashboard';
+import LenderDashboard from './components/pages/LenderDashboard';
+import OracleDashboard from './components/pages/OracleDashboard';
+import Marketplace from './components/pages/Marketplace';
 
 function App() {
   const [account, setAccount] = useState(null);
@@ -36,6 +36,7 @@ function App() {
     onChainChanged(() => {
       window.location.reload();
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const checkIfWalletIsConnected = async () => {
@@ -124,7 +125,7 @@ function App() {
         <header className="header">
           <div className="header-content">
             <Link to="/" className="logo" style={{ textDecoration: 'none' }}>
-              🏦 MSME Credit Platform
+              MSME Credit Platform
             </Link>
             
             <nav className="nav">
@@ -137,40 +138,21 @@ function App() {
 
             <div>
               {networkError && (
-                <div style={{ 
-                  background: '#fed7d7', 
-                  color: '#742a2a',
-                  padding: '8px 16px', 
-                  borderRadius: '8px',
-                  marginRight: '12px',
-                  fontSize: '14px'
-                }}>
+                <div className="network-status network-status-error">
                   ⚠️ {networkError}
                 </div>
               )}
               {account ? (
-                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                  <span style={{ 
-                    background: chainId === '11155111' ? '#f0fff4' : '#fed7d7',
-                    padding: '8px 16px', 
-                    borderRadius: '8px',
-                    fontWeight: '500',
-                    fontSize: '14px'
-                  }}>
-                    {chainId === '11155111' ? '🟢 Sepolia' : '🔴 Wrong Network'}
+                <div className="d-flex gap-3 align-center">
+                  <span className={parseInt(NETWORK_CONFIG.chainId, 16).toString() === chainId ? 'network-status network-status-connected' : 'network-status network-status-error'}>
+                    {parseInt(NETWORK_CONFIG.chainId, 16).toString() === chainId ? `🟢 ${NETWORK_CONFIG.chainName}` : '🔴 Wrong Network'}
                   </span>
-                  <span style={{ 
-                    background: '#f7fafc', 
-                    padding: '8px 16px', 
-                    borderRadius: '8px',
-                    fontWeight: '500' 
-                  }}>
+                  <span className="account-address">
                     {formatAddress(account)}
                   </span>
                   <button 
                     onClick={handleDisconnect}
-                    className="button"
-                    style={{ padding: '8px 16px', background: '#e2e8f0', color: '#4a5568' }}
+                    className="btn-disconnect"
                   >
                     Disconnect
                   </button>

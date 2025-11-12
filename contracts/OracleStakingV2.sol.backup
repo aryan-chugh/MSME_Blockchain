@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title OracleStaking V2 - Enhanced Version
+ * @dev Improvements:
+ * 1. ✅ Better reputation system with automatic updates
+ * 2. ✅ Improved slashing with fund distribution
+ * 3. ✅ Access control for reputation updates
+ * 4. ✅ Automatic reputation decay over time
+ */
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+contract OracleStakingV2 is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    // State variables
+    IERC20 public immutable citToken;
+    address public governance;
+    address public attestationRegistry;  // 🆕 Authorized to update reputation
+    
+    uint256 public constant MINIMUM_STAKE = 50_000 * 1e18;
+    uint256 public constant STAKE_COOLDOWN = 24 hours;
+    
+    // 🆕 Reputation decay (1 point per month)
+    uint256 public constant REPUTATION_DECAY_PERIOD = 30 days;
+    uint256 public constant REPUTATION_DECAY_AMOUNT = 1;
+    
+    // Oracle information
+    struct OracleInfo {
+        uint256 stakedAmount;
+        uint256 reputationScore;
+        uint256 attestationCount;
+        uint256 slashCount;
+        uint256 registrationTime;
+        uint256 lastWithdrawTime;
+        uint256 lastReputationUpdateTime;  // 🆕 Track last reputation update
+        bool isActive;
+    }
+    
+    mapping(address => OracleInfo) public oracles;
+    address[] public oracleList;
+    
+    // 🆕 Slashing distribution recipients
+    uint256 public totalSlashedAmount;
+    uint256 public burnedAmount;  // Track burned/locked tokens
+
+    // Events
+    event OracleRegistered(address indexed oracle, uint256 amount);
+    event StakeIncreased(address indexed oracle, uint256 amount, uint256 newTotal);
+    event StakeWithdrawn(address indexed oracle, uint256 amount, uint256 remaining);
+    event OracleSlashed(address indexed oracle, uint256 amount, string reason);
+    event ReputationUpdated(address indexed oracle, int256 delta, uint256 newScore, string reason);
+    event ReputationDecayed(address indexed oracle, uint256 decayAmount, uint256 newScore);
+    event GovernanceTransferred(address indexed oldGovernance, address indexed newGovernance);
+    event AttestationRegistrySet(address indexed registry);
+    event SlashedFundsDistributed(
+        address indexed oracle,
+        uint256 totalSlashed,
+        uint256 toMSME,
+        uint256 toPlatform,
+        uint256 burned
+    );
+
+    // Modifiers
+    modifier onlyGovernance() {
+        require(msg.sender == governance, "Only governance can call");
+        _;
+    }
+
+    modifier onlyAuthorized() {
+        require(
+            msg.sender == governance || msg.sender == attestationRegistry,
+            "Not authorized"
+        );
+        _;
+    }
+
+    modifier isStakedOracle(address _oracle) {
+        require(
+            oracles[_oracle].stakedAmount >= MINIMUM_STAKE && oracles[_oracle].isActive,
+            "Not a valid staked oracle"
+        );
+        _;
+    }
+
+    constructor(address _citTokenAddress, address _governance) {
+        require(_citTokenAddress != address(0), "Invalid token address");
+        require(_governance != address(0), "Invalid governance address");
+        
+        citToken = IERC20(_citTokenAddress);
+        governance = _governance;
+    }
+
+    /**
+     * @dev 🆕 Set the attestation registry address (governance only)
+     */
+    function setAttestationRegistry(address _registry) external onlyGovernance {
+        require(_registry != address(0), "Invalid registry address");
+        attestationRegistry = _registry;
+        emit AttestationRegistrySet(_registry);
+    }
+
+    /**
+     * @dev Stake tokens to become an oracle
+     */
+    function stake(uint256 amount) external {
+        require(amount >= MINIMUM_STAKE, "Stake below minimum");
+        
+        if (oracles[msg.sender].lastWithdrawTime > 0) {
+            require(
+                block.timestamp >= oracles[msg.sender].lastWithdrawTime + STAKE_COOLDOWN,
+                "Stake cooldown period not elapsed"
+            );
+        }
+        
+        citToken.safeTransferFrom(msg.sender, address(this), amount);
+        
+        if (oracles[msg.sender].stakedAmount == 0) {
+            // New oracle registration
+            oracles[msg.sender] = OracleInfo({
+                stakedAmount: amount,
+                reputationScore: 100,  // Start with 100
+                attestationCount: 0,
+                slashCount: 0,
+                registrationTime: block.timestamp,
+                lastWithdrawTime: 0,
+                lastReputationUpdateTime: block.timestamp,  // 🆕
+                isActive: true
+            });
+            oracleList.push(msg.sender);
+            emit OracleRegistered(msg.sender, amount);
+        } else {
+            // Increase existing stake
+            oracles[msg.sender].stakedAmount += amount;
+            oracles[msg.sender].isActive = true;
+            emit StakeIncreased(msg.sender, amount, oracles[msg.sender].stakedAmount);
+        }
+    }
+
+    /**
+     * @dev Withdraw staked tokens
+     */
+    function withdraw(uint256 amount) external nonReentrant {
+        require(oracles[msg.sender].stakedAmount >= amount, "Insufficient stake");
+        
+        // 🆕 Apply reputation decay before withdrawal
+        _applyReputationDecay(msg.sender);
+        
+        oracles[msg.sender].stakedAmount -= amount;
+        oracles[msg.sender].lastWithdrawTime = block.timestamp;
+        
+        if (oracles[msg.sender].stakedAmount < MINIMUM_STAKE) {
+            oracles[msg.sender].isActive = false;
+        }
+        
+        citToken.safeTransfer(msg.sender, amount);
+        emit StakeWithdrawn(msg.sender, amount, oracles[msg.sender].stakedAmount);
+    }
+
+    /**
+     * @dev 🆕 Enhanced slashing with fund distribution
+     * @param oracle Oracle to slash
+     * @param amount Total amount to slash
+     * @param compensationRecipient Address to receive compensation (e.g., affected MSME)
+     * @param compensationAmount Amount to send to recipient
+     * @param reason Reason for slashing
+     */
+    function slashWithDistribution(
+        address oracle,
+        uint256 amount,
+        address compensationRecipient,
+        uint256 compensationAmount,
+        string calldata reason
+    ) external onlyAuthorized nonReentrant {
+        require(oracles[oracle].stakedAmount >= amount, "Insufficient stake to slash");
+        require(compensationAmount <= amount, "Compensation exceeds slash amount");
+        
+        oracles[oracle].stakedAmount -= amount;
+        oracles[oracle].slashCount += 1;
+        oracles[oracle].isActive = false;
+        
+        totalSlashedAmount += amount;
+        
+        // Distribute slashed funds:
+        // 1. Compensation to affected party (50%)
+        if (compensationAmount > 0 && compensationRecipient != address(0)) {
+            citToken.safeTransfer(compensationRecipient, compensationAmount);
+        }
+        
+        // 2. Platform share (30%)
+        uint256 platformShare = (amount * 30) / 100;
+        citToken.safeTransfer(governance, platformShare);
+        
+        // 3. Burn/lock remaining (20%)
+        uint256 burnAmount = amount - compensationAmount - platformShare;
+        burnedAmount += burnAmount;
+        // Note: Tokens stay in contract (locked), or you could implement actual burning
+        
+        emit OracleSlashed(oracle, amount, reason);
+        emit SlashedFundsDistributed(
+            oracle,
+            amount,
+            compensationAmount,
+            platformShare,
+            burnAmount
+        );
+    }
+
+    /**
+     * @dev Original slash function (backward compatibility)
+     */
+    function slash(address oracle, uint256 amount, string calldata reason) 
+        external onlyGovernance nonReentrant {
+        require(oracles[oracle].stakedAmount >= amount, "Insufficient stake to slash");
+        
+        oracles[oracle].stakedAmount -= amount;
+        oracles[oracle].slashCount += 1;
+        oracles[oracle].isActive = false;
+        
+        totalSlashedAmount += amount;
+        citToken.safeTransfer(governance, amount);
+        
+        emit OracleSlashed(oracle, amount, reason);
+    }
+
+    /**
+     * @dev 🆕 Update oracle reputation with access control and reason tracking
+     * @param oracle Address of oracle
+     * @param delta Change in reputation (positive or negative)
+     * @param reason Human-readable reason for change
+     */
+    function updateReputation(
+        address oracle, 
+        int256 delta,
+        string calldata reason
+    ) external onlyAuthorized {
+        require(oracles[oracle].registrationTime > 0, "Oracle not registered");
+        
+        // Apply pending decay first
+        _applyReputationDecay(oracle);
+        
+        uint256 oldScore = oracles[oracle].reputationScore;
+        
+        if (delta > 0) {
+            oracles[oracle].reputationScore += uint256(delta);
+        } else if (delta < 0) {
+            uint256 decrease = uint256(-delta);
+            if (oracles[oracle].reputationScore > decrease) {
+                oracles[oracle].reputationScore -= decrease;
+            } else {
+                oracles[oracle].reputationScore = 0;
+            }
+        }
+        
+        oracles[oracle].lastReputationUpdateTime = block.timestamp;
+        
+        emit ReputationUpdated(oracle, delta, oracles[oracle].reputationScore, reason);
+    }
+
+    /**
+     * @dev 🆕 Backward-compatible updateReputation (without reason)
+     */
+    function updateReputation(address oracle, int256 delta) external onlyAuthorized {
+        this.updateReputation(oracle, delta, "");
+    }
+
+    /**
+     * @dev 🆕 Apply time-based reputation decay
+     * Reputation decays by 1 point per month to prevent oracle monopolies
+     */
+    function _applyReputationDecay(address oracle) internal {
+        if (oracles[oracle].lastReputationUpdateTime == 0) return;
+        
+        uint256 timeSinceUpdate = block.timestamp - oracles[oracle].lastReputationUpdateTime;
+        uint256 decayPeriods = timeSinceUpdate / REPUTATION_DECAY_PERIOD;
+        
+        if (decayPeriods > 0) {
+            uint256 totalDecay = decayPeriods * REPUTATION_DECAY_AMOUNT;
+            
+            if (oracles[oracle].reputationScore > totalDecay) {
+                oracles[oracle].reputationScore -= totalDecay;
+            } else {
+                oracles[oracle].reputationScore = 0;
+            }
+            
+            oracles[oracle].lastReputationUpdateTime = block.timestamp;
+            
+            emit ReputationDecayed(oracle, totalDecay, oracles[oracle].reputationScore);
+        }
+    }
+
+    /**
+     * @dev 🆕 Public function to apply reputation decay (anyone can call)
+     */
+    function applyReputationDecay(address oracle) external {
+        require(oracles[oracle].registrationTime > 0, "Oracle not registered");
+        _applyReputationDecay(oracle);
+    }
+
+    /**
+     * @dev Increment attestation count (called by AttestationRegistry)
+     */
+    function incrementAttestationCount(address oracle) external isStakedOracle(oracle) {
+        oracles[oracle].attestationCount += 1;
+    }
+
+    /**
+     * @dev Get oracle information with current reputation (including decay)
+     */
+    function getOracleInfo(address oracle) external view returns (OracleInfo memory) {
+        OracleInfo memory info = oracles[oracle];
+        
+        // Calculate current reputation with decay
+        if (info.lastReputationUpdateTime > 0) {
+            uint256 timeSinceUpdate = block.timestamp - info.lastReputationUpdateTime;
+            uint256 decayPeriods = timeSinceUpdate / REPUTATION_DECAY_PERIOD;
+            
+            if (decayPeriods > 0) {
+                uint256 totalDecay = decayPeriods * REPUTATION_DECAY_AMOUNT;
+                if (info.reputationScore > totalDecay) {
+                    info.reputationScore -= totalDecay;
+                } else {
+                    info.reputationScore = 0;
+                }
+            }
+        }
+        
+        return info;
+    }
+
+    /**
+     * @dev Get current reputation score (including decay)
+     */
+    function getCurrentReputation(address oracle) external view returns (uint256) {
+        OracleInfo memory info = oracles[oracle];
+        
+        if (info.lastReputationUpdateTime == 0) return info.reputationScore;
+        
+        uint256 timeSinceUpdate = block.timestamp - info.lastReputationUpdateTime;
+        uint256 decayPeriods = timeSinceUpdate / REPUTATION_DECAY_PERIOD;
+        
+        if (decayPeriods > 0) {
+            uint256 totalDecay = decayPeriods * REPUTATION_DECAY_AMOUNT;
+            if (info.reputationScore > totalDecay) {
+                return info.reputationScore - totalDecay;
+            } else {
+                return 0;
+            }
+        }
+        
+        return info.reputationScore;
+    }
+
+    /**
+     * @dev Get all registered oracles
+     */
+    function getAllOracles() external view returns (address[] memory) {
+        return oracleList;
+    }
+
+    /**
+     * @dev Check if address is a valid staked oracle
+     */
+    function isValidOracle(address oracle) external view returns (bool) {
+        return oracles[oracle].stakedAmount >= MINIMUM_STAKE && oracles[oracle].isActive;
+    }
+
+    /**
+     * @dev Get oracle tier based on stake amount
+     */
+    function getOracleTier(address oracle) external view returns (uint256) {
+        uint256 stakedAmount = oracles[oracle].stakedAmount;
+        
+        if (stakedAmount >= 1_000_000 * 1e18) return 4;
+        if (stakedAmount >= 500_000 * 1e18) return 3;
+        if (stakedAmount >= 200_000 * 1e18) return 2;
+        if (stakedAmount >= MINIMUM_STAKE) return 1;
+        return 0;
+    }
+
+    /**
+     * @dev Transfer governance to new address
+     */
+    function transferGovernance(address newGovernance) external onlyGovernance {
+        require(newGovernance != address(0), "Invalid address");
+        address oldGovernance = governance;
+        governance = newGovernance;
+        emit GovernanceTransferred(oldGovernance, newGovernance);
+    }
+
+    /**
+     * @dev 🆕 Get slashing statistics
+     */
+    function getSlashingStats() external view returns (
+        uint256 totalSlashed,
+        uint256 totalBurned
+    ) {
+        return (totalSlashedAmount, burnedAmount);
+    }
+}

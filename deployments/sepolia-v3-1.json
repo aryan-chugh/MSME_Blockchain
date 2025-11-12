@@ -1,0 +1,11 @@
+{
+  "network": "sepolia",
+  "timestamp": 1762706452151,
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "version": "v3.1",
+  "contracts": {
+    "OracleStaking": "0xAA3a2F385374459fDebB35f6Bea87EFd4d18dBb9",
+    "CIToken": "0xb9ED4a38536BB4B3CbC3e24d5761E7E84D16634d",
+    "AttestationRegistryV3_1": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
+  }
+}

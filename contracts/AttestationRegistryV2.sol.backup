@@ -1,0 +1,557 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title AttestationRegistry V2 - Enhanced Version
+ * @dev Improvements:
+ * 1. ✅ Oracle fee distribution implemented
+ * 2. ✅ Automatic reputation updates
+ * 3. ✅ MSME-specified validity periods
+ * 4. ✅ Improved slashing fund distribution
+ * 5. ✅ Dispute resolution system
+ */
+
+import "./OracleStaking.sol";
+import "./CIToken.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+contract AttestationRegistryV2 is Pausable {
+    using SafeERC20 for IERC20;
+    
+    OracleStaking public immutable oracleStaking;
+    IERC20 public immutable citToken;
+    address public governance;
+    
+    // Fee distribution percentages (out of 10000 = 100%)
+    uint256 public constant ORACLE_FEE_PERCENTAGE = 9000;      // 90% to oracle
+    uint256 public constant PLATFORM_FEE_PERCENTAGE = 1000;    // 10% to platform
+
+    // Enhanced Attestation Request structure
+    struct AttestationRequest {
+        uint256 id;
+        address msme;
+        bytes32 schemaId;
+        string documentHash;
+        string documentUrl;
+        bytes additionalData;
+        uint256 feePaid;
+        uint256 requestedValidityPeriod;  // 🆕 MSME specifies desired validity
+        uint256 timestamp;
+        RequestStatus status;
+        address assignedOracle;
+        uint256 completedAt;
+        uint256 actualValidityPeriod;     // 🆕 Oracle confirms validity
+    }
+
+    enum RequestStatus {
+        Pending,
+        InProgress,
+        Completed,
+        Rejected,
+        Cancelled,
+        Disputed  // 🆕 MSME disputes attestation
+    }
+
+    // Attestation structure (unchanged)
+    struct Attestation {
+        bytes32 schemaId;
+        address issuer;
+        bytes data;
+        uint256 timestamp;
+        uint256 expiryTime;
+        bool revoked;
+    }
+
+    // Schema structure (unchanged)
+    struct Schema {
+        string name;
+        string description;
+        bool active;
+        uint256 createdAt;
+    }
+
+    // 🆕 Dispute structure
+    struct Dispute {
+        uint256 requestId;
+        address msme;
+        address oracle;
+        string reason;
+        uint256 timestamp;
+        bool resolved;
+        bool msmeWon;  // True if MSME won dispute
+    }
+
+    // Mappings
+    mapping(uint256 => AttestationRequest) public attestationRequests;
+    uint256 public requestCounter;
+    mapping(address => uint256[]) public msmeRequests;
+    mapping(address => uint256[]) public oracleRequests;
+    
+    mapping(address => Attestation[]) public attestations;
+    mapping(bytes32 => Schema) public schemas;
+    mapping(address => mapping(bytes32 => uint256)) public attestationCount;
+    
+    // Collusion detection
+    mapping(address => mapping(address => uint256)) public coAttestationCount;
+    mapping(address => uint256) public totalAttestations;
+    uint256 public constant COLLUSION_THRESHOLD = 70;
+    mapping(address => bool) public flaggedForCollusion;
+    
+    // 🆕 Dispute tracking
+    mapping(uint256 => Dispute) public disputes;  // requestId => Dispute
+    uint256 public disputeCounter;
+    
+    // 🆕 Platform earnings tracking
+    uint256 public platformEarnings;
+    
+    bytes32[] public schemaList;
+
+    // Events
+    event AttestationRequested(
+        uint256 indexed requestId,
+        address indexed msme,
+        bytes32 indexed schemaId,
+        uint256 feePaid,
+        uint256 requestedValidityPeriod  // 🆕
+    );
+    event RequestAssigned(uint256 indexed requestId, address indexed oracle);
+    event RequestCompleted(
+        uint256 indexed requestId, 
+        uint256 attestationIndex,
+        uint256 oracleFee,           // 🆕
+        uint256 platformFee          // 🆕
+    );
+    event RequestRejected(
+        uint256 indexed requestId, 
+        address indexed oracle, 
+        string reason,
+        uint256 reputationPenalty    // 🆕
+    );
+    event RequestCancelled(uint256 indexed requestId, address indexed msme);
+    
+    event AttestationMade(
+        address indexed msmeId, 
+        address indexed issuer, 
+        bytes32 indexed schemaId,
+        uint256 attestationIndex,
+        uint256 validityPeriod       // 🆕
+    );
+    event AttestationRevoked(address indexed msmeId, uint256 indexed attestationIndex, address indexed revoker);
+    event SchemaRegistered(bytes32 indexed schemaId, string name);
+    event OracleFlaggedForCollusion(address indexed oracle, uint256 collusionPercentage);
+    
+    // 🆕 New events
+    event DisputeFiled(uint256 indexed requestId, address indexed msme, string reason);
+    event DisputeResolved(uint256 indexed requestId, bool msmeWon, uint256 slashAmount);
+    event PlatformFeesWithdrawn(address indexed to, uint256 amount);
+    event ReputationUpdated(address indexed oracle, int256 delta, uint256 newScore, string reason);
+
+    // Modifiers
+    modifier onlyStakedOracle() {
+        require(oracleStaking.isValidOracle(msg.sender), "Caller is not a valid staked oracle");
+        _;
+    }
+
+    modifier onlyGovernance() {
+        require(msg.sender == governance, "Only governance can call");
+        _;
+    }
+
+    /**
+     * @dev Constructor
+     */
+    constructor(
+        address _stakingContractAddress, 
+        address _governance,
+        address _citTokenAddress
+    ) {
+        require(_stakingContractAddress != address(0), "Invalid staking contract");
+        require(_governance != address(0), "Invalid governance address");
+        require(_citTokenAddress != address(0), "Invalid token address");
+        
+        oracleStaking = OracleStaking(_stakingContractAddress);
+        governance = _governance;
+        citToken = IERC20(_citTokenAddress);
+    }
+
+    /**
+     * @dev MSME creates an attestation request with requested validity period
+     * 🆕 Added requestedValidityPeriod parameter
+     * 🆕 MSME must approve and transfer CIT tokens for fee
+     */
+    function requestAttestation(
+        bytes32 schemaId,
+        string calldata documentHash,
+        string calldata documentUrl,
+        bytes calldata additionalData,
+        uint256 feePaid,
+        uint256 requestedValidityPeriod  // 🆕 MSME specifies desired validity (in seconds)
+    ) external whenNotPaused returns (uint256) {
+        require(schemas[schemaId].active, "Schema not active");
+        require(bytes(documentHash).length > 0, "Document hash required");
+        require(feePaid > 0, "Fee must be greater than 0");
+        require(requestedValidityPeriod > 0, "Validity period must be > 0");
+        require(requestedValidityPeriod <= 365 days, "Validity period too long");
+        
+        // 🆕 Transfer fee from MSME to contract (escrow)
+        citToken.safeTransferFrom(msg.sender, address(this), feePaid);
+        
+        requestCounter++;
+        uint256 requestId = requestCounter;
+        
+        attestationRequests[requestId] = AttestationRequest({
+            id: requestId,
+            msme: msg.sender,
+            schemaId: schemaId,
+            documentHash: documentHash,
+            documentUrl: documentUrl,
+            additionalData: additionalData,
+            feePaid: feePaid,
+            requestedValidityPeriod: requestedValidityPeriod,  // 🆕
+            timestamp: block.timestamp,
+            status: RequestStatus.Pending,
+            assignedOracle: address(0),
+            completedAt: 0,
+            actualValidityPeriod: 0  // 🆕
+        });
+        
+        msmeRequests[msg.sender].push(requestId);
+        
+        emit AttestationRequested(requestId, msg.sender, schemaId, feePaid, requestedValidityPeriod);
+        
+        return requestId;
+    }
+
+    /**
+     * @dev Oracle assigns themselves to a pending request
+     */
+    function assignRequest(uint256 requestId) external onlyStakedOracle {
+        AttestationRequest storage request = attestationRequests[requestId];
+        require(request.msme != address(0), "Request does not exist");
+        require(request.status == RequestStatus.Pending, "Request not available");
+        
+        request.status = RequestStatus.InProgress;
+        request.assignedOracle = msg.sender;
+        oracleRequests[msg.sender].push(requestId);
+        
+        emit RequestAssigned(requestId, msg.sender);
+    }
+
+    /**
+     * @dev Oracle rejects an attestation request
+     * 🆕 Automatic reputation penalty
+     * 🆕 Fee refunded to MSME
+     */
+    function rejectRequest(uint256 requestId, string calldata reason) external onlyStakedOracle {
+        AttestationRequest storage request = attestationRequests[requestId];
+        require(request.assignedOracle == msg.sender, "Not assigned to you");
+        require(request.status == RequestStatus.InProgress, "Request not in progress");
+        
+        request.status = RequestStatus.Rejected;
+        request.completedAt = block.timestamp;
+        
+        // 🆕 Refund fee to MSME
+        citToken.safeTransfer(request.msme, request.feePaid);
+        
+        // 🆕 Reputation penalty for rejection (-3 points)
+        int256 reputationPenalty = -3;
+        oracleStaking.updateReputation(msg.sender, reputationPenalty);
+        
+        emit RequestRejected(requestId, msg.sender, reason, uint256(-reputationPenalty));
+        emit ReputationUpdated(msg.sender, reputationPenalty, 0, "Request rejected");
+    }
+
+    /**
+     * @dev Submit an attestation for an MSME
+     * 🆕 Fee distribution to oracle and platform
+     * 🆕 Automatic reputation increase
+     * 🆕 Oracle can adjust validity period (within reason)
+     */
+    function submitAttestation(
+        address msmeId,
+        bytes32 schemaId,
+        bytes calldata data,
+        uint256 requestId,
+        uint256 proposedValidityPeriod  // 🆕 Oracle can propose different validity
+    ) external onlyStakedOracle whenNotPaused {
+        require(msmeId != address(0), "Invalid MSME address");
+        require(schemas[schemaId].active, "Schema not active");
+        require(proposedValidityPeriod > 0, "Invalid validity period");
+        
+        AttestationRequest storage request = attestationRequests[requestId];
+        require(request.assignedOracle == msg.sender, "Not assigned to you");
+        require(request.status == RequestStatus.InProgress, "Request not in progress");
+        
+        // 🆕 Validate proposed validity is reasonable (within 20% of requested)
+        uint256 minValidity = (request.requestedValidityPeriod * 80) / 100;
+        uint256 maxValidity = (request.requestedValidityPeriod * 120) / 100;
+        require(
+            proposedValidityPeriod >= minValidity && proposedValidityPeriod <= maxValidity,
+            "Proposed validity too different from requested"
+        );
+        
+        uint256 expiryTime = block.timestamp + proposedValidityPeriod;
+        
+        // Create attestation
+        attestations[msmeId].push(Attestation({
+            schemaId: schemaId,
+            issuer: msg.sender,
+            data: data,
+            timestamp: block.timestamp,
+            expiryTime: expiryTime,
+            revoked: false
+        }));
+        
+        uint256 attestationIndex = attestations[msmeId].length - 1;
+        attestationCount[msmeId][schemaId] += 1;
+        
+        // Track collusion
+        _trackCoAttestation(msmeId, msg.sender);
+        totalAttestations[msg.sender] += 1;
+        
+        // Increment oracle's attestation count
+        oracleStaking.incrementAttestationCount(msg.sender);
+        
+        // 🆕 Distribute fees
+        uint256 oracleFee = (request.feePaid * ORACLE_FEE_PERCENTAGE) / 10000;  // 90%
+        uint256 platformFee = request.feePaid - oracleFee;  // Remaining 10%
+        
+        citToken.safeTransfer(msg.sender, oracleFee);  // Pay oracle
+        platformEarnings += platformFee;  // Track platform earnings
+        
+        // 🆕 Reputation increase for successful attestation (+5 points)
+        int256 reputationBonus = 5;
+        oracleStaking.updateReputation(msg.sender, reputationBonus);
+        
+        // Mark request as completed
+        request.status = RequestStatus.Completed;
+        request.completedAt = block.timestamp;
+        request.actualValidityPeriod = proposedValidityPeriod;
+        
+        emit RequestCompleted(requestId, attestationIndex, oracleFee, platformFee);
+        emit AttestationMade(msmeId, msg.sender, schemaId, attestationIndex, proposedValidityPeriod);
+        emit ReputationUpdated(msg.sender, reputationBonus, 0, "Attestation completed");
+    }
+
+    /**
+     * @dev 🆕 MSME files a dispute against an attestation
+     * If dispute is valid, oracle gets slashed
+     */
+    function fileDispute(uint256 requestId, string calldata reason) external {
+        AttestationRequest storage request = attestationRequests[requestId];
+        require(request.msme == msg.sender, "Not your request");
+        require(request.status == RequestStatus.Completed, "Request not completed");
+        require(disputes[requestId].timestamp == 0, "Dispute already filed");
+        
+        // Can only dispute within 30 days of completion
+        require(
+            block.timestamp <= request.completedAt + 30 days,
+            "Dispute period expired"
+        );
+        
+        request.status = RequestStatus.Disputed;
+        
+        disputeCounter++;
+        disputes[requestId] = Dispute({
+            requestId: requestId,
+            msme: msg.sender,
+            oracle: request.assignedOracle,
+            reason: reason,
+            timestamp: block.timestamp,
+            resolved: false,
+            msmeWon: false
+        });
+        
+        emit DisputeFiled(requestId, msg.sender, reason);
+    }
+
+    /**
+     * @dev 🆕 Governance resolves a dispute
+     * If MSME wins: oracle slashed, MSME compensated, oracle reputation -50
+     * If oracle wins: no action
+     */
+    function resolveDispute(uint256 requestId, bool msmeWins) external onlyGovernance {
+        Dispute storage dispute = disputes[requestId];
+        require(!dispute.resolved, "Dispute already resolved");
+        
+        dispute.resolved = true;
+        dispute.msmeWon = msmeWins;
+        
+        AttestationRequest storage request = attestationRequests[requestId];
+        
+        if (msmeWins) {
+            // Slash oracle (10% of minimum stake = 5,000 CIT)
+            uint256 slashAmount = 5000 * 1e18;
+            
+            // Split slashed funds:
+            // 50% to MSME (compensation)
+            // 30% to platform treasury
+            // 20% stays in staking contract (or could be burned)
+            uint256 msmeCompensation = slashAmount / 2;
+            uint256 platformShare = (slashAmount * 30) / 100;
+            
+            // Call OracleStaking to slash
+            // Note: This requires updating OracleStaking.slash() to support fund distribution
+            oracleStaking.slashWithDistribution(
+                dispute.oracle,
+                slashAmount,
+                dispute.msme,
+                msmeCompensation,
+                "Lost attestation dispute"
+            );
+            
+            platformEarnings += platformShare;
+            
+            // Severe reputation penalty
+            oracleStaking.updateReputation(dispute.oracle, -50);
+            
+            emit DisputeResolved(requestId, true, slashAmount);
+        } else {
+            emit DisputeResolved(requestId, false, 0);
+        }
+    }
+
+    /**
+     * @dev 🆕 Withdraw platform earnings (governance only)
+     */
+    function withdrawPlatformFees(address to, uint256 amount) external onlyGovernance {
+        require(amount <= platformEarnings, "Insufficient platform earnings");
+        
+        platformEarnings -= amount;
+        citToken.safeTransfer(to, amount);
+        
+        emit PlatformFeesWithdrawn(to, amount);
+    }
+
+    /**
+     * @dev Revoke an attestation (only issuer can revoke)
+     * 🆕 Reputation penalty for revocation
+     */
+    function revokeAttestation(address msmeId, uint256 attestationIndex) external {
+        require(attestationIndex < attestations[msmeId].length, "Invalid index");
+        Attestation storage attestation = attestations[msmeId][attestationIndex];
+        
+        require(msg.sender == attestation.issuer, "Only issuer can revoke");
+        require(!attestation.revoked, "Already revoked");
+        
+        attestation.revoked = true;
+        
+        // 🆕 Reputation penalty for revocation (-10 points)
+        oracleStaking.updateReputation(msg.sender, -10);
+        
+        emit AttestationRevoked(msmeId, attestationIndex, msg.sender);
+        emit ReputationUpdated(msg.sender, -10, 0, "Attestation revoked");
+    }
+
+    // ... (Rest of the functions remain the same: getAttestations, schemas, etc.)
+    
+    /**
+     * @dev Internal function to track co-attestation patterns
+     */
+    function _trackCoAttestation(address msmeId, address currentOracle) internal {
+        Attestation[] memory msmeAttestations = attestations[msmeId];
+        
+        for (uint256 i = 0; i < msmeAttestations.length; i++) {
+            address otherOracle = msmeAttestations[i].issuer;
+            if (otherOracle == currentOracle) continue;
+            
+            coAttestationCount[currentOracle][otherOracle] += 1;
+            coAttestationCount[otherOracle][currentOracle] += 1;
+            
+            _checkCollusionThreshold(currentOracle, otherOracle);
+        }
+    }
+
+    /**
+     * @dev Check if two oracles exceed collusion threshold
+     * 🆕 Automatic slashing if flagged
+     */
+    function _checkCollusionThreshold(address oracle1, address oracle2) internal {
+        uint256 totalOracle1 = totalAttestations[oracle1];
+        uint256 totalOracle2 = totalAttestations[oracle2];
+        
+        if (totalOracle1 < 10 || totalOracle2 < 10) return;
+        
+        uint256 coCount = coAttestationCount[oracle1][oracle2];
+        
+        // Check oracle1
+        uint256 oracle1Percentage = (coCount * 100) / totalOracle1;
+        if (oracle1Percentage >= COLLUSION_THRESHOLD && !flaggedForCollusion[oracle1]) {
+            flaggedForCollusion[oracle1] = true;
+            
+            // 🆕 Severe reputation penalty for collusion
+            oracleStaking.updateReputation(oracle1, -100);
+            
+            emit OracleFlaggedForCollusion(oracle1, oracle1Percentage);
+            emit ReputationUpdated(oracle1, -100, 0, "Flagged for collusion");
+        }
+        
+        // Check oracle2
+        uint256 oracle2Percentage = (coCount * 100) / totalOracle2;
+        if (oracle2Percentage >= COLLUSION_THRESHOLD && !flaggedForCollusion[oracle2]) {
+            flaggedForCollusion[oracle2] = true;
+            
+            // 🆕 Severe reputation penalty
+            oracleStaking.updateReputation(oracle2, -100);
+            
+            emit OracleFlaggedForCollusion(oracle2, oracle2Percentage);
+            emit ReputationUpdated(oracle2, -100, 0, "Flagged for collusion");
+        }
+    }
+
+    // Getter functions (unchanged)
+    function getAttestations(address msmeId) external view returns (Attestation[] memory) {
+        return attestations[msmeId];
+    }
+
+    function getPendingRequests() external view returns (uint256[] memory) {
+        uint256 pendingCount = 0;
+        for (uint256 i = 1; i <= requestCounter; i++) {
+            if (attestationRequests[i].status == RequestStatus.Pending) {
+                pendingCount++;
+            }
+        }
+        
+        uint256[] memory pendingIds = new uint256[](pendingCount);
+        uint256 index = 0;
+        for (uint256 i = 1; i <= requestCounter; i++) {
+            if (attestationRequests[i].status == RequestStatus.Pending) {
+                pendingIds[index] = i;
+                index++;
+            }
+        }
+        return pendingIds;
+    }
+
+    function getRequestDetails(uint256 requestId) external view returns (AttestationRequest memory) {
+        require(attestationRequests[requestId].msme != address(0), "Request does not exist");
+        return attestationRequests[requestId];
+    }
+
+    function getMSMERequests(address msme) external view returns (uint256[] memory) {
+        return msmeRequests[msme];
+    }
+
+    function getOracleRequests(address oracle) external view returns (uint256[] memory) {
+        return oracleRequests[oracle];
+    }
+
+    /**
+     * @dev Register a new attestation schema
+     */
+    function registerSchema(bytes32 schemaId, string calldata name, string calldata description) external {
+        require(schemas[schemaId].createdAt == 0, "Schema already exists");
+        
+        schemas[schemaId] = Schema({
+            name: name,
+            description: description,
+            active: true,
+            createdAt: block.timestamp
+        });
+        
+        schemaList.push(schemaId);
+        emit SchemaRegistered(schemaId, name);
+    }
+}

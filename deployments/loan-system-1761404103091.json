@@ -1,0 +1,15 @@
+{
+  "network": "sepolia",
+  "timestamp": "2025-10-25T14:55:03.091Z",
+  "deployer": "0x4C7A8d194A36FDf53365490D1cAd92E59f648571",
+  "contracts": {
+    "LoanMarketplace": "0x921A9da420604A5393CAf8a14e63424B596E2092",
+    "LoanAgreementRegistry": "0xCC06fDfF34B14a576325Df10D225EbA73C8B7f46",
+    "CIToken": "0xad942a8EEade6c95e5dbB2F83C433E0BB2314a1B",
+    "PlatformGovernance": "0xaE614A4365201e1E247e4AE0203B4aeE322bfb0A"
+  },
+  "settings": {
+    "minCommitPeriod": "120",
+    "minRevealPeriod": "120"
+  }
+}

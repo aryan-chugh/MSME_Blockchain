@@ -1,0 +1,101 @@
+{
+  "network": "localhost",
+  "chainId": "31337",
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "timestamp": "2025-11-11T00:54:39.960Z",
+  "contracts": {
+    "CIToken": "0x3aAde2dCD2Df6a8cAc689EE797591b2913658659",
+    "OracleStaking": "0xab16A69A5a8c12C732e0DEFF4BE56A70bb64c926",
+    "AttestationRegistry": "0xE3011A37A904aB90C8881a99BD1F6E21401f1522",
+    "LoanMarketplace": "0x457cCf29090fe5A24c19c1bc95F492168C0EaFdb",
+    "LoanAgreementRegistry": "0x525C7063E7C20997BaaE9bDa922159152D0e8417",
+    "PlatformGovernance": "0x38a024C0b412B9d1db8BC398140D00F5Af3093D4",
+    "MSMEIdentity": "0x5fc748f1FEb28d7b76fa1c6B07D8ba2d5535177c",
+    "DynamicCreditScore": "0xB82008565FdC7e44609fA118A4a681E92581e680",
+    "FlashAssessment": "0x2a810409872AfC346F9B5b26571Fd6eC42EA4849",
+    "SocialCreditSystem": "0xb9bEECD1A582768711dE1EE7B0A1d582D9d72a6C",
+    "PredictiveAnalyticsOracle": "0x8A93d247134d91e0de6f96547cB0204e5BE8e5D8"
+  },
+  "schemas": [
+    {
+      "id": "gst-revenue",
+      "name": "GST Revenue Verification",
+      "description": "Verified revenue data from GST returns",
+      "hash": "0x1d9a9685070f56edbe34f600e59b60534ac750927dc7df290cfe3664dbe37621"
+    },
+    {
+      "id": "bank-statements",
+      "name": "Bank Statement Verification",
+      "description": "Verified bank account statements and cash flow",
+      "hash": "0x7dbbd055e131f9aaf5f492c24a743c685f655aab68a42d284c993f5187e1b809"
+    },
+    {
+      "id": "kyc-basic",
+      "name": "KYC Basic Verification",
+      "description": "Basic KYC verification including identity documents",
+      "hash": "0xb039788e33126084729d15fa94590f64079970beaa01167026be0ef55f87774b"
+    },
+    {
+      "id": "credit-score",
+      "name": "Credit Score",
+      "description": "Credit bureau score attestation",
+      "hash": "0xb7d4f589d55b902a131d35bb1b29c63b38a7c472e84b09c1ac87fd40b785554c"
+    }
+  ],
+  "testAccounts": [
+    {
+      "role": "Admin/Deployer",
+      "address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "balance": "10100000.0",
+      "success": true
+    },
+    {
+      "role": "Oracle 1",
+      "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "balance": "100000.0",
+      "success": true
+    },
+    {
+      "role": "Oracle 2",
+      "address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "balance": "100000.0",
+      "success": true
+    },
+    {
+      "role": "Oracle 3",
+      "address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+      "balance": "100000.0",
+      "success": true
+    },
+    {
+      "role": "MSME 1",
+      "address": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+      "balance": "100000.0",
+      "success": true
+    },
+    {
+      "role": "MSME 2",
+      "address": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
+      "balance": "100000.0",
+      "success": true
+    },
+    {
+      "role": "Lender 1",
+      "address": "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
+      "balance": "100000.0",
+      "success": true
+    },
+    {
+      "role": "Lender 2",
+      "address": "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955",
+      "balance": "100000.0",
+      "success": true
+    }
+  ],
+  "verification": {
+    "contractsDeployed": 11,
+    "schemasRegistered": 0,
+    "accountsFunded": 8,
+    "totalSupply": "10800000.0"
+  }
+}

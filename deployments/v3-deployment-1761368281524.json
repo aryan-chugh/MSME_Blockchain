@@ -1,0 +1,13 @@
+{
+  "network": "sepolia",
+  "chainId": "11155111",
+  "deployer": "0x4C7A8d194A36FDf53365490D1cAd92E59f648571",
+  "timestamp": "2025-10-25T04:56:23.614Z",
+  "version": "V3",
+  "contracts": {
+    "CIToken": "0xb9ED4a38536BB4B3CbC3e24d5761E7E84D16634d",
+    "PlatformGovernance": "0xAC6F626A6c58101cbc86AbEbD8dE428534D4a668",
+    "OracleStakingV3": "0xAA3a2F385374459fDebB35f6Bea87EFd4d18dBb9",
+    "AttestationRegistryV3": "0x129e293d574a3F9D5652e477076C31bd1b694991"
+  }
+}
