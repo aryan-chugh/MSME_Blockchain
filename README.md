@@ -17,17 +17,6 @@ npm run node                    # Terminal 1: Start blockchain
 .\deploy-localhost.ps1          # Terminal 2: Deploy everything
 cd frontend && npm start        # Terminal 3: Start frontend
 ```
-
-**See [LOCALHOST_QUICKSTART.md](./LOCALHOST_QUICKSTART.md) for complete setup**
-
-### 📚 Documentation
-- **[LOCALHOST_QUICKSTART.md](./LOCALHOST_QUICKSTART.md)** - ⭐ Start here! Quick 3-command setup
-- **[PROJECT_STRUCTURE_NEW.md](./PROJECT_STRUCTURE_NEW.md)** - 📁 Organized project structure
-- **[docs/guides/ONE_SCRIPT_DEPLOYMENT.md](./docs/guides/ONE_SCRIPT_DEPLOYMENT.md)** - Single deployment script guide
-- **[docs/guides/DEPLOYMENT_GUIDE.md](./docs/guides/DEPLOYMENT_GUIDE.md)** - Complete deployment instructions
-- **[docs/guides/SCRIPTS_GUIDE.md](./docs/guides/SCRIPTS_GUIDE.md)** - All scripts reference
-- **[docs/E2E_TESTING_GUIDE.md](./docs/E2E_TESTING_GUIDE.md)** - End-to-end testing
-
 ---
 
 ## 🌟 Overview
